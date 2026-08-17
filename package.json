@@ -1,0 +1,61 @@
+{
+  "name": "@loghq/stacks",
+  "type": "module",
+  "version": "0.1.0",
+  "description": "loghq log streaming for Stacks applications",
+  "author": "loghq",
+  "license": "MIT",
+  "homepage": "https://loghq.org",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/loghqorg/loghq-stacks.git"
+  },
+  "bugs": {
+    "url": "https://github.com/loghqorg/loghq-stacks/issues"
+  },
+  "keywords": ["loghq", "logging", "log-management", "stacks", "stx", "bun"],
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "README.md"],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "bun run build.ts",
+    "test": "bun test",
+    "lint": "bunx --bun pickier .",
+    "lint:fix": "bunx --bun pickier . --fix",
+    "format": "bunx --bun pickier . --format",
+    "format:fix": "bunx --bun pickier . --format --write",
+    "typecheck": "bunx --bun tsc --noEmit",
+    "prepublishOnly": "bun run build",
+    "release": "bumpp package.json",
+    "release:patch": "bumpp patch --yes package.json",
+    "release:minor": "bumpp minor --yes package.json",
+    "release:major": "bumpp major --yes package.json"
+  },
+  "peerDependencies": {
+    "@stacksjs/logging": "^0.70.366"
+  },
+  "peerDependenciesMeta": {
+    "@stacksjs/logging": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@stacksjs/logging": "^0.70.366",
+    "@types/bun": "^1.1.14",
+    "@types/node": "^22.10.2",
+    "bumpp": "^12.0.0",
+    "pickier": "^0.1.38",
+    "typescript": "^5.7.2"
+  }
+}

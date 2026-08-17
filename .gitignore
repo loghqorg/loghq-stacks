@@ -1,0 +1,12 @@
+node_modules
+dist
+coverage
+*.log
+.DS_Store
+.turbo
+.idea
+.vscode/*
+!.vscode/extensions.json
+
+# Written and removed by build.ts on every run.
+tsconfig.dts.json
