@@ -404,6 +404,14 @@ export class LogHQClient {
   private running: Promise<boolean> | null = null
   /** Entries this client is known to have thrown away, for the debug channel. */
   private lost = 0
+  /**
+   * How many times a batch has come back to the queue.
+   *
+   * The drain loops use this to tell progress from a stall. Counting requeues
+   * rather than watching the queue length is what makes them immune to entries
+   * arriving while a send is in flight.
+   */
+  private requeues = 0
 
   constructor(config: LogHQConfig) {
     this.config = resolveConfig(config)
@@ -601,7 +609,17 @@ export class LogHQClient {
   private requeue(entries: LogHQEntry[]): void {
     if (!entries.length)
       return
+
+    // A stopped client never drains again, so putting entries back would strand
+    // them somewhere nothing will ever count them. Charge them here, while the
+    // count is still accurate.
+    if (this.stopped()) {
+      this.discard(entries.length, `client disabled: ${this.disabledBy}`)
+      return
+    }
+
     this.queue.unshift(...entries)
+    this.requeues++
     this.enforceQueueLimit()
   }
 
@@ -659,10 +677,19 @@ export class LogHQClient {
    * `running` is assigned synchronously, before the chained drain gets its
    * microtask, because the caller most likely to need it is a `flush()` landing
    * in the same tick as the `batchSize` trigger that scheduled this one.
+   *
+   * The drain itself also starts synchronously when nothing is already
+   * draining. Going through `.then()` unconditionally cost the `beforeExit`
+   * flush its request on Bun, which exits without running a pending microtask:
+   * the handler queued the drain, the process ended, and the fetch was never
+   * issued. Deferring only when there is genuinely something to queue behind
+   * keeps the serialization guarantee and gets the request onto the wire in the
+   * same tick. `running === null` implies the previous drain settled, so this
+   * cannot overlap two drains.
    */
   private chainDrain(final: boolean): Promise<boolean> {
     const start = (): Promise<boolean> => (final ? this.finalDrain() : this.drain())
-    const next = this.chain.then(start, start)
+    const next = this.running === null ? start() : this.chain.then(start, start)
     this.chain = next
     this.running = next
     const clear = (): void => {
@@ -683,7 +710,7 @@ export class LogHQClient {
         if (this.blocked())
           return false
 
-        const before = this.queue.length
+        const marker = this.requeues
         const batch = this.queue.splice(0, this.config.batchSize)
         const outcome = await this.deliver(batch, 0)
         if (!outcome.clean)
@@ -695,11 +722,16 @@ export class LogHQClient {
         if (this.blocked())
           return false
 
-        // Nothing left the queue, so the next pass would send the same batch
-        // again. Hand off to the timer rather than spin: this needs a server
-        // that reports every entry as over-cap, but a tight loop against one
-        // would be far worse than a late flush.
-        if (this.queue.length >= before) {
+        // Progress means the batch left the queue and stayed gone, so the next
+        // pass will send something new. Measured by requeues, not by queue
+        // length: entries logged while the send was in flight make the queue
+        // grow during a perfectly healthy drain, and length alone read that as
+        // a stall and reported a clean flush as failed.
+        if (this.requeues > marker) {
+          // The same batch is about to be sent again. Hand off to the timer
+          // rather than spin: this needs a server that reports every entry as
+          // over-cap, but a tight loop against one is far worse than a late
+          // flush.
           if (++stalled >= 2)
             return false
         }
@@ -720,9 +752,22 @@ export class LogHQClient {
     return clean
   }
 
-  /** True while sending would be pointless: disabled, closed, or paused. */
+  /**
+   * True while sending would be pointless: permanently stopped, or paused.
+   *
+   * `closed` is deliberately not one of these. `close()` sets it before running
+   * the final drain, so counting it here gave that drain a retry budget of one:
+   * the first network blip inside `close()` reached `backoff`, saw a disabled
+   * client, and threw the batch away rather than retrying it. Ingress is closed
+   * by `isEnabled`, which does treat `closed` as disabled.
+   */
   private blocked(): boolean {
-    return this.disabledBy !== null || Date.now() < this.pausedUntil
+    return this.stopped() || Date.now() < this.pausedUntil
+  }
+
+  /** Permanently stopped. No later send can succeed, so nothing should queue. */
+  private stopped(): boolean {
+    return this.disabledBy !== null && this.disabledBy !== 'closed'
   }
 
   /**
@@ -732,10 +777,14 @@ export class LogHQClient {
    * keeps trying turns a misconfigured key into an outbound flood. The queue is
    * released too, since nothing in it can ever be delivered.
    */
-  private disable(reason: DisabledReason, detail: string): void {
+  private disable(reason: DisabledReason, detail: string, inFlight: readonly LogHQEntry[] = []): void {
     this.disabledBy = reason
     this.clearTimer()
-    const stranded = this.queue.length
+    // The in-flight batch was spliced out of the queue before the send, so it
+    // is not in `this.queue` and went uncounted: a client killed by a bad key
+    // under-reported its losses by up to a full batch, and `lost` is the only
+    // number an operator has to reconcile against what the server stored.
+    const stranded = this.queue.length + inFlight.length
     this.queue = []
     this.debug('warn', `disabled (${reason}): ${detail}`)
     this.discard(stranded, `client disabled: ${reason}`)
@@ -752,11 +801,12 @@ export class LogHQClient {
       body = JSON.stringify({ logs: batch })
     }
     catch (err) {
-      // Entries are round-tripped through JSON at enqueue time, so this should
-      // be unreachable. If it happens, retrying would only throw again.
-      this.debug('warn', 'batch could not be serialized', err)
-      this.discard(batch.length, 'unserializable batch')
-      return { clean: false }
+      // One bad entry, not a bad batch. `clip` round-trips `context`, `user`,
+      // and `sdk`, but an entry is spread verbatim, so any other field the
+      // caller attached (a BigInt, a circular reference, a `toJSON` that
+      // throws) reaches this line intact and used to cost all 500 entries
+      // around it. Isolate it instead.
+      return this.isolate(batch, attempt, err)
     }
 
     let response: Response
@@ -784,15 +834,15 @@ export class LogHQClient {
         return { clean: false }
 
       case 401:
-        this.disable('auth', 'invalid ingest key')
+        this.disable('auth', 'invalid ingest key', batch)
         return { clean: false }
 
       case 403:
-        this.disable('inactive-project', 'project inactive or has no ingest key')
+        this.disable('inactive-project', 'project inactive or has no ingest key', batch)
         return { clean: false }
 
       case 404:
-        this.disable('unknown-project', 'unknown project')
+        this.disable('unknown-project', 'unknown project', batch)
         return { clean: false }
 
       case 413:
@@ -882,10 +932,35 @@ export class LogHQClient {
       this.discard(1, 'entry too large to send')
       return { clean: false }
     }
+    return this.halve(batch, attempt)
+  }
 
+  /**
+   * Find the entries that cannot be serialized and drop only those.
+   *
+   * Bisecting costs log2(n) extra requests in the rare case something in the
+   * batch is unserializable, and nothing at all otherwise, which is a better
+   * trade than losing every entry that happened to be queued alongside it.
+   */
+  private async isolate(batch: LogHQEntry[], attempt: number, cause: unknown): Promise<DeliveryOutcome> {
+    if (batch.length === 1) {
+      this.debug('warn', 'entry could not be serialized, dropping it', cause)
+      this.discard(1, 'unserializable entry')
+      return { clean: false }
+    }
+    return this.halve(batch, attempt)
+  }
+
+  /**
+   * Deliver a batch as two halves.
+   *
+   * The attempt count is deliberately not incremented. Neither caller is
+   * reacting to a transport failure: a `413` is a sizing answer and a
+   * serialization throw is a content answer, so each half deserves its own full
+   * retry budget.
+   */
+  private async halve(batch: LogHQEntry[], attempt: number): Promise<DeliveryOutcome> {
     const mid = Math.ceil(batch.length / 2)
-    // Attempt count is not incremented: a 413 is a sizing answer, not a
-    // transport failure, and the halves deserve their own full retry budget.
     const first = await this.deliver(batch.slice(0, mid), attempt)
     if (this.blocked()) {
       this.requeue(batch.slice(mid))
@@ -928,12 +1003,12 @@ export class LogHQClient {
     await sleep(window / 2 + Math.random() * (window / 2))
 
     if (this.blocked()) {
-      // Disabled or paused while we were waiting. Hold the batch instead of
-      // firing it into a wall.
-      if (this.disabledBy === null)
-        this.requeue(batch)
-      else
+      // Stopped or paused while we were waiting. Hold the batch instead of
+      // firing it into a wall, unless there is nothing left to hold it for.
+      if (this.stopped())
         this.discard(batch.length, 'client disabled mid-retry')
+      else
+        this.requeue(batch)
       return { clean: false }
     }
 
@@ -969,9 +1044,11 @@ export class LogHQClient {
 
   private async finalDrain(): Promise<boolean> {
     let clean = true
+    let stalled = 0
+
     while (this.queue.length) {
       // Permanent reasons still stop us; `closed` does not.
-      if (this.disabledBy !== null && this.disabledBy !== 'closed')
+      if (this.stopped())
         return false
       if (Date.now() < this.pausedUntil) {
         this.discard(this.queue.length, 'rate limited at close')
@@ -979,11 +1056,28 @@ export class LogHQClient {
         return false
       }
 
+      const marker = this.requeues
       const batch = this.queue.splice(0, this.config.batchSize)
       const outcome = await this.deliver(batch, 0)
       if (!outcome.clean)
         clean = false
+
+      // The same guard `drain` has, and it matters more here. Without it, a
+      // server that answers every batch with `dropped` kept this loop
+      // requeueing and resending the same entries as fast as the network
+      // allowed, and `close()` never resolved. Give up and say what was lost.
+      if (this.requeues > marker) {
+        if (++stalled >= 2) {
+          this.discard(this.queue.length, 'no progress at close')
+          this.queue = []
+          return false
+        }
+      }
+      else {
+        stalled = 0
+      }
     }
+
     return clean
   }
 

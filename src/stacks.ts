@@ -61,8 +61,15 @@ export interface StacksOptions {
   logger?: unknown
 }
 
-/** Which attachment point the adapter ended up using. */
-export type LoggerSeam = 'transport' | 'tee' | 'none'
+/**
+ * Which attachment point the adapter ended up using.
+ *
+ * `conflict` means another copy of this package in the same process already
+ * owns the logger, so this installation is inert. It is reported separately
+ * from `none` because the fix is completely different: `none` means no logger
+ * was found, `conflict` means one was found and someone else got there first.
+ */
+export type LoggerSeam = 'transport' | 'tee' | 'none' | 'conflict'
 
 export interface SeamInfo {
   seam: LoggerSeam
@@ -111,6 +118,14 @@ interface Installation {
 interface LoggingHandle {
   ns: Record<string, unknown>
   log: Record<string, unknown>
+}
+
+/** What {@link teeLog} managed to do to the log singleton. */
+interface TeeResult {
+  /** Methods this installation now owns. */
+  wrapped: number
+  /** Methods already carrying our marker, so owned by another copy. */
+  foreign: number
 }
 
 let current: Installation | null = null
@@ -289,10 +304,27 @@ function attachTo(inst: Installation, handle: LoggingHandle): void {
     return
   }
 
-  if (teeLog(inst, handle.log)) {
+  const tee = teeLog(inst, handle.log)
+  if (tee.wrapped > 0) {
     inst.seam = 'tee'
     inst.via = 'log.*'
     diag(inst, 'attached by teeing the log singleton')
+    return
+  }
+
+  if (tee.foreign > 0) {
+    inst.seam = 'conflict'
+    inst.via = null
+    // Deliberately not behind `debug`. Every method is already wrapped by
+    // another copy of this package, so this client is fully configured, holds
+    // a queue, reports itself enabled, and will never receive a single line.
+    // Nothing about that is observable from the outside except an empty
+    // dashboard, which is exactly when a warning is worth interrupting for.
+    warnOnce(
+      'another copy of @loghq/stacks already owns the logger, so this install() is inert '
+      + 'and its client will receive nothing. Deduplicate the package so one copy is '
+      + 'hoisted for the whole process, or call install() once from the app.',
+    )
     return
   }
 
@@ -399,8 +431,9 @@ function tryTransport(inst: Installation, ns: Record<string, unknown>): string |
  * never awaited: a log call must not become slower or more failure-prone
  * because something is watching it.
  */
-function teeLog(inst: Installation, log: Record<string, unknown>): boolean {
+function teeLog(inst: Installation, log: Record<string, unknown>): TeeResult {
   let wrapped = 0
+  let foreign = 0
 
   for (const method of TEE_METHODS) {
     const original = log[method]
@@ -408,9 +441,13 @@ function teeLog(inst: Installation, log: Record<string, unknown>): boolean {
       continue
 
     // Already ours, from this copy of the package or another one in the same
-    // process. Wrapping again would duplicate every line downstream.
-    if ((original as unknown as Record<symbol, unknown>)[WRAPPED])
+    // process. Wrapping again would duplicate every line downstream. Counted,
+    // because a tee that wraps nothing at all means someone else owns the
+    // logger and the caller needs to hear about it.
+    if ((original as unknown as Record<symbol, unknown>)[WRAPPED]) {
+      foreign++
       continue
+    }
 
     const fn = original as (...args: unknown[]) => unknown
     const wrapper = function (this: unknown, ...args: unknown[]): unknown {
@@ -447,7 +484,7 @@ function teeLog(inst: Installation, log: Record<string, unknown>): boolean {
     })
   }
 
-  return wrapped > 0
+  return { wrapped, foreign }
 }
 
 function pickFn(source: unknown, name: string): ((...args: unknown[]) => unknown) | null {
@@ -538,6 +575,33 @@ function forwardRecord(inst: Installation, record: unknown): void {
 }
 
 /**
+ * Add a context field without letting its name reach the prototype.
+ *
+ * Two traps, both silent, and both hit by field names an application picks
+ * without a second thought:
+ *
+ *   - `'toString' in context` is true for every `{}`, so a `!(key in context)`
+ *     guard dropped every field named after an `Object.prototype` member:
+ *     `constructor`, `valueOf`, `hasOwnProperty`, `toString`, and friends.
+ *   - `context.__proto__ = value` reassigns the prototype instead of adding a
+ *     key, so that field vanished and took the object's shape with it.
+ *
+ * An own-property check answers the first and `defineProperty` answers the
+ * second. Enumerable, so `JSON.stringify` still sees it.
+ *
+ * `hasOwnProperty` is called off `Object.prototype` rather than off `context`,
+ * for the same reason the guard exists at all: `context` may now carry a field
+ * of that name.
+ */
+const hasOwn = Object.prototype.hasOwnProperty
+
+function setField(context: Record<string, unknown>, key: string, value: unknown): void {
+  if (hasOwn.call(context, key))
+    return
+  Object.defineProperty(context, key, { value, writable: true, enumerable: true, configurable: true })
+}
+
+/**
  * Build the wire entry.
  *
  * The first argument arrives raw and can be any of three things, because
@@ -567,18 +631,35 @@ function toEntry(inst: Installation, level: LogHQLevel, rawLevel: string, args: 
 
   // The object wins over the string tag: `[db.slow_query]` is a formatting
   // artifact, the object is the event.
+  //
+  // Recognising it by `typeof event === 'string'` alone was too greedy. An
+  // application writing `log.info('user signed up', { event: 'signup' })` hit
+  // this branch and had its message replaced by `signup`, which is the worst
+  // thing this package can do to a line: `message` is the only field the
+  // dashboard's `?q=` searches, so the entry became unfindable by the words its
+  // author chose. The emitter always pairs the object with its own bracketed
+  // tag or sends it alone, and an ordinary call with a trailing context object
+  // matches neither.
   const structAt = args.findIndex(a => isPlainObject(a) && typeof a.event === 'string')
-  if (structAt !== -1) {
+  const structEvent = structAt === -1
+    ? null
+    : String((args[structAt] as Record<string, unknown>).event)
+  const isStructCall = structEvent !== null && (
+    args.length === 1
+    || args.some(a => typeof a === 'string' && (a === `[${structEvent}]` || a === structEvent))
+  )
+
+  if (isStructCall) {
     if (!inst.captureStruct)
       return null
 
     const fields = args[structAt] as Record<string, unknown>
-    const event = String(fields.event)
+    const event = structEvent
     channel = event
     message = event
     for (const [key, value] of Object.entries(fields).slice(0, MAX_ITEMS)) {
-      if (key !== 'event' && !(key in context))
-        context[key] = serialize(value, 1, new WeakSet())
+      if (key !== 'event')
+        setField(context, key, serialize(value, 1, new WeakSet()))
     }
 
     for (let i = 0; i < args.length; i++) {
@@ -621,8 +702,7 @@ function toEntry(inst: Installation, level: LogHQLevel, rawLevel: string, args: 
     // every logger with this signature, so its keys are worth having at the top
     // of `context` where they are queryable, not nested inside `args[0]`.
     for (const [key, value] of Object.entries(rest[0] as Record<string, unknown>).slice(0, MAX_ITEMS)) {
-      if (!(key in context))
-        context[key] = serialize(value, 1, new WeakSet())
+      setField(context, key, serialize(value, 1, new WeakSet()))
     }
   }
   else if (rest.length) {
@@ -1016,6 +1096,20 @@ function isoOf(date: Date): string {
  * logger it is draining, so routing a word of it through `log.*` would hand the
  * wrapper its own output and recurse until the stack ends.
  */
+/**
+ * A misconfiguration serious enough to report without being asked.
+ *
+ * Once per copy of this package, never per entry: an SDK that talks over the
+ * application's own console output has misjudged whose terminal it is.
+ */
+let warnedOnce = false
+function warnOnce(message: string): void {
+  if (warnedOnce)
+    return
+  warnedOnce = true
+  console.warn(`[loghq/stacks] ${message}`)
+}
+
 function diag(inst: Installation, message: string, detail?: unknown): void {
   if (!inst.debug)
     return
