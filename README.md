@@ -128,7 +128,7 @@ Every option is optional except `key` (or a `dsn` carrying one).
 |---|---|---|---|
 | `key` | `string` | required | Project ingest key, `loghq_<64 hex>`. Public by design: it identifies a project, is revocable, and grants no read access, so it is safe in app config. |
 | `dsn` | `string` | none | `https://<key>@<host>`. An alternative to `key` plus `host`. An explicit `key` or `host` wins over the DSN part. |
-| `host` | `string` | `https://loghq.org` | Point at your own instance if you self-host. |
+| `host` | `string` | `http://127.0.0.1:3008` | Leave unset. See the note below. |
 | `environment` | `string` | `APP_ENV`, then `NODE_ENV`, else `production` | |
 | `release` | `string` | `APP_VERSION` or `RELEASE` when set | Version or commit the entry came from. |
 | `channel` | `string` | none | Applied to entries that do not carry their own. |
@@ -144,6 +144,19 @@ Every option is optional except `key` (or a `dsn` carrying one).
 | `beforeSend` | `(entry) => entry \| null` | none | Last chance to redact, enrich, or drop. Return `null` to discard the entry. Throwing is caught and treated as `null`. |
 | `debug` | `boolean` | `false` | SDK diagnostics. Written to `console` only, never through the host logger. |
 | `sdk` | `{ name, version }` | `loghq.stacks` at this package's version | Override the SDK identity. Integrations set this; applications should not. |
+
+> [!NOTE]
+> `host` defaults to `http://127.0.0.1:3008`, where `bun run dev` in the loghq
+> repo serves the ingest. That is deliberate and temporary: loghq is not serving
+> production ingest for these SDKs yet, so every consumer today is running
+> locally and should not have to name an endpoint to do it. The IPv4 literal
+> rather than `localhost` is deliberate too, since that server binds 127.0.0.1
+> only and `localhost` can resolve to `::1` first.
+>
+> It becomes `https://loghq.org` in the release that makes production ingest
+> real. Do not set `host` to work around this: the point of a default is that
+> the SDK owns where entries go, and an app that pins it now has to be found and
+> unpinned later. Set it only when you genuinely self-host.
 
 ## Levels
 

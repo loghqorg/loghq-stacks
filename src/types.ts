@@ -10,8 +10,25 @@
 export const SDK_NAME = 'loghq.stacks'
 export const SDK_VERSION = '0.1.0'
 
-/** Default ingest host, overridable by config or DSN. */
-export const DEFAULT_HOST = 'https://loghq.org'
+/**
+ * Where entries go when neither `host` nor a DSN says otherwise.
+ *
+ * POINTED AT LOCAL DEVELOPMENT ON PURPOSE, AND TEMPORARILY. loghq is not
+ * serving production ingest for these SDKs yet, so every consumer today runs
+ * against `bun run dev` in the loghq repo, which serves the API on 3008. An app
+ * should not have to configure an endpoint to do the only thing currently
+ * possible.
+ *
+ * The IPv4 literal rather than `localhost` is deliberate: the dev server binds
+ * 127.0.0.1 only, so on a machine where `localhost` resolves to `::1` first,
+ * the connection is refused.
+ *
+ * This has to become `https://loghq.org` before release, and that release needs
+ * a version bump, because a library defaulting to a loopback address fails in
+ * the worst way available: it deploys, connects to nothing, the transport
+ * swallows the error by design, and missing logs are the only symptom.
+ */
+export const DEFAULT_HOST = 'http://127.0.0.1:3008'
 
 /**
  * The eight RFC 5424 / PSR-3 severities loghq accepts, least to most severe.
