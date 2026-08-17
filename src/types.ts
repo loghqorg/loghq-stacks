@@ -161,6 +161,45 @@ export interface ResolvedConfig extends Required<Omit<LogHQConfig, 'dsn' | 'befo
 }
 
 /**
+ * One log call, as the Stacks logger hands it to a transport.
+ *
+ * Declared here rather than imported from `@stacksjs/types` so this package
+ * keeps no hard dependency on the framework: it is an optional peer, and a
+ * `.d.ts` referencing a package the consumer does not have is a type error in
+ * someone else's build.
+ *
+ * Deliberately wider than the upstream `LogRecord` in every field. That is what
+ * makes {@link StacksLogTransport} assignable to the upstream `LogTransport`:
+ * a handler that accepts more than it will be given is safe, one that accepts
+ * less is not.
+ */
+export interface StacksLogRecord {
+  level: string
+  /** The formatted line. Lossier than `args`, which is why it is a fallback. */
+  message?: string
+  /** The call before formatting: an `Error` is still an `Error` here. */
+  args?: unknown[]
+  /** Trace id, request id, and whatever `withLogContext` added. */
+  context?: Record<string, unknown>
+  timestamp?: string
+  [key: string]: unknown
+}
+
+/**
+ * A Stacks log transport, structurally.
+ *
+ * Matches `LogTransport` from `@stacksjs/types`. `level` is spelled out as the
+ * literal union rather than `string` because that is the one field the upstream
+ * type narrows, and a widened copy would not be assignable.
+ */
+export interface StacksLogTransport {
+  name: string
+  level?: 'debug' | 'info' | 'success' | 'warning' | 'error'
+  log: (record: StacksLogRecord) => void
+  flush?: () => Promise<void>
+}
+
+/**
  * Why a client stopped accepting entries.
  *
  * `auth` and `unknown-project` are permanent: the spec is explicit that

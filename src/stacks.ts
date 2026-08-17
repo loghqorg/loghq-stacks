@@ -9,13 +9,15 @@
  * Two seams exist, probed in preference order at runtime:
  *
  *   1. A transport registry on `@stacksjs/logging`. This is where a logger is
- *      supposed to be extended, and it does not exist upstream yet. The branch
- *      is written anyway, defensively, so the day it lands this package uses it
- *      without a release. See {@link tryTransport}.
+ *      supposed to be extended. It landed upstream as `registerTransport()`
+ *      plus a `transports` key on `config/logging.ts`, so a modern framework
+ *      version takes this branch. See {@link tryTransport}, and
+ *      {@link loghqTransport} for the declarative form.
  *   2. Teeing the mutable `log` singleton. Stacks exports `log` as a plain
  *      object whose methods are reassignable, and `log.struct` routes back
  *      through those same methods, so wrapping six functions captures both the
- *      ad-hoc and the structured stream. This is the seam in use today.
+ *      ad-hoc and the structured stream. This is the fallback on a framework
+ *      version that predates the registry.
  *
  * The recursion hazard is the thing to understand before changing anything
  * here. We are wrapping the very logger the SDK would reach for if it ever
@@ -26,7 +28,7 @@
  * one.
  */
 
-import type { LogHQConfig, LogHQEntry, LogHQLevel } from './types'
+import type { LogHQConfig, LogHQEntry, LogHQLevel, StacksLogRecord, StacksLogTransport } from './types'
 import { LogHQClient } from './client'
 import { atLeast, isLossy, toLogHQLevel } from './levels'
 
@@ -59,6 +61,20 @@ export interface StacksOptions {
    * unset and let `install()` find the real one.
    */
   logger?: unknown
+}
+
+/** Options {@link loghqTransport} adds on top of {@link LogHQConfig}. */
+export interface TransportOptions {
+  /**
+   * The transport's name in the framework's diagnostics. Default `loghq`.
+   *
+   * Worth changing only when an app declares two of these, e.g. one project for
+   * application logs and another for audit.
+   */
+  name?: string
+
+  /** Forward `log.struct` events. Default `true`. See {@link StacksOptions}. */
+  captureStruct?: boolean
 }
 
 /**
@@ -249,6 +265,81 @@ export function whenAttached(): Promise<SeamInfo> {
 /** The client the current installation owns, if any. */
 export function installedClient(): LogHQClient | null {
   return current ? current.client : null
+}
+
+/**
+ * A loghq transport for `config/logging.ts`.
+ *
+ * The declarative half of this package, and the better half where the
+ * framework supports it. `install()` has to find a seam at runtime and patch
+ * it; this is handed the stream by the logger itself, which means no patching,
+ * no ordering problem, and no per-process install: every process that boots the
+ * framework reads the same config.
+ *
+ * @example
+ * ```ts
+ * // config/logging.ts
+ * import { loghqTransport } from '@loghq/stacks'
+ *
+ * export default {
+ *   logsPath: storagePath('logs/stacks.log'),
+ *   deploymentsPath: storagePath('logs/deployments.log'),
+ *   transports: [loghqTransport({ key: env.LOGHQ_KEY })],
+ * } satisfies LoggingConfig
+ * ```
+ *
+ * Crash reports arrive without any extra wiring: the framework's own
+ * `uncaughtException` and `unhandledRejection` handlers funnel through
+ * `report()`, which calls `log.error`, which reaches this transport like any
+ * other line. That is why this does not install process handlers of its own the
+ * way `install()` does. A bare script with no framework entry point still wants
+ * `install()`.
+ *
+ * Returns a plain object, so a config file stays a config file: nothing is
+ * patched and nothing is registered until the logger reads it.
+ */
+export function loghqTransport(config: LogHQConfig & TransportOptions = {}): StacksLogTransport {
+  const client = new LogHQClient(config)
+
+  // The record's own context, for the duration of the record. `toEntry` reads
+  // correlation ids through `getLogContext`, and in this seam the logger has
+  // already resolved them and put them on the record, so pointing that lookup
+  // at the record is more accurate than calling into the framework again from
+  // a different async context.
+  let inFlight: unknown
+
+  const inst: Installation = {
+    client,
+    debug: config.debug === true,
+    captureStruct: config.captureStruct !== false,
+    seam: 'transport',
+    via: 'config/logging.ts',
+    restore: [],
+    getLogContext: () => inFlight,
+    // Not part of the install generation: this transport is owned by the config
+    // that declared it, and `uninstall()` must not silently detach it.
+    token: -1,
+  }
+
+  return {
+    name: config.name ?? 'loghq',
+    // Deliberately no `level`: the transport asks for everything and filters on
+    // `minLevel` instead. The framework's five levels and loghq's eight are
+    // different scales, so a threshold expressed in the framework's vocabulary
+    // would be filtering against the wrong one.
+    log(record: StacksLogRecord): void {
+      inFlight = record?.context
+      try {
+        forwardRecord(inst, record)
+      }
+      finally {
+        inFlight = undefined
+      }
+    },
+    async flush(): Promise<void> {
+      await client.flush()
+    },
+  }
 }
 
 // --- Attachment -------------------------------------------------------------
@@ -554,8 +645,16 @@ function forwardRecord(inst: Installation, record: unknown): void {
     if (!entry)
       return
 
-    // Host-supplied fields win over anything reconstructed from the args.
-    if (typeof r.message === 'string' && r.message)
+    // Prefer what `toEntry` derived from the raw arguments, and fall back to
+    // the record's own message only when there was nothing to derive.
+    //
+    // The record's `message` is the formatted console line. It carries the
+    // request-id prefix and the whole context object pretty-printed into the
+    // string, which is exactly the noise this package exists to avoid shipping:
+    // `log.info('checkout started', { orderId: 42 })` formats to
+    // `checkout started {\n  "orderId": 42\n}`, while the args give a clean
+    // message and a queryable `context.orderId`.
+    if (!entry.message && typeof r.message === 'string' && r.message)
       entry.message = r.message
     if (typeof r.channel === 'string')
       entry.channel = r.channel

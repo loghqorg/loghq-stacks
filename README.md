@@ -14,30 +14,24 @@ optional at runtime, so nothing breaks if you pull this into a plain script.
 
 ## Quick start
 
-Stacks has no service providers and no bootstrap hook, so there is nowhere the
-framework will call this for you. You wire it yourself, and the honest answer
-today is a side-effect import that runs early.
-
-Create a file the app owns:
+Declare a transport in `config/logging.ts`:
 
 ```ts
-// app/Bootstrap.ts
-import { install } from '@loghq/stacks'
+// config/logging.ts
+import { loghqTransport } from '@loghq/stacks'
+import { storagePath } from '@stacksjs/path'
 
-install({
-  key: process.env.LOGHQ_KEY,
-  environment: process.env.APP_ENV,
-  release: process.env.APP_VERSION,
-})
-```
-
-Then import it first in `app/Routes.ts`, which is loaded once, before any route
-is served:
-
-```ts
-// app/Routes.ts
-import './Bootstrap'
-// ... your existing route registrations
+export default {
+  logsPath: storagePath('logs/stacks.log'),
+  deploymentsPath: storagePath('logs/deployments.log'),
+  transports: [
+    loghqTransport({
+      key: process.env.LOGHQ_KEY,
+      environment: process.env.APP_ENV,
+      release: process.env.APP_VERSION,
+    }),
+  ],
+} satisfies LoggingConfig
 ```
 
 That is the whole integration. Keep logging exactly as you were:
@@ -49,12 +43,37 @@ await log.info('checkout started', { orderId: 42 })
 await log.error(new Error('gateway timeout'))
 ```
 
-If you would rather not add a file, call `install()` inline at the top of
-`app/Routes.ts`. `app/Bootstrap.ts` exists only so the wiring has an obvious
-home.
+Config is the right home for this, and not only on taste. It applies to every
+process that boots the framework, so your scheduler and queue workers ship
+their logs too, which a bootstrap import in `app/Routes.ts` would miss. Nothing
+is monkey-patched, so there is no ordering window in which lines are lost. And
+crash reports arrive without extra wiring: the framework's own
+`uncaughtException` and `unhandledRejection` handlers funnel through `report()`,
+which calls `log.error`, which reaches this transport like any other line.
 
-Ordering matters in one direction: anything logged before `install()` runs is
-never captured. This is a runtime wrap of a mutable singleton, not a build step.
+### On an older framework version
+
+`transports` needs a framework version that has it. Without one, wire it
+yourself with a side-effect import that runs early:
+
+```ts
+// app/Bootstrap.ts
+import { install } from '@loghq/stacks'
+
+install({ key: process.env.LOGHQ_KEY })
+```
+
+```ts
+// app/Routes.ts
+import './Bootstrap'
+// ... your existing route registrations
+```
+
+`install()` probes for the transport registry first and falls back to teeing
+the mutable `log` singleton, so the same call works on both. Two things are
+true of the fallback that are not true of the config path: anything logged
+before `install()` runs is never captured, and it only covers the process that
+imported it.
 
 You can pass a single `dsn` instead of `key` plus `host`:
 
@@ -211,17 +230,38 @@ forever. Every diagnostic goes straight to `console`, and only when `debug` is
 `true`. If loghq is unreachable, your application logs behave exactly as they did
 before you installed this.
 
+## Two seams, and why
+
+`@stacksjs/logging` grew a transports API: a `transports` key on
+`config/logging.ts` and a `registerTransport()` export. That is the seam this
+package prefers, and the one `loghqTransport()` uses. The logger hands every
+record to the transport before formatting, so an `Error` is still an `Error` and
+a context object is still an object, rather than both being flattened into the
+console line.
+
+Before that existed, the only hook was clarity's `formatter`, which is the wrong
+shape: it is called for its return value, on the finished string, after the
+level has been flattened. Building structured output through it means parsing
+back out what the logger just finished formatting.
+
+So the fallback is teeing the mutable `log` singleton, which Stacks exports as a
+plain object with reassignable methods. `install()` keeps that intervention as
+small as it can: the wrapper calls the original first, returns exactly what it
+returned, enqueues a copy after, and is reversible by identity. `log.struct`
+routes back through those same methods, so wrapping six functions captures the
+structured stream too.
+
+`install()` probes for the registry first and only tees if it finds none, so the
+same call works on any framework version and upgrades itself when the app does.
+
 ## Roadmap
 
-`@stacksjs/logging` has no transports, channels, or handlers concept today.
-`config/logging.ts` carries exactly two keys, `logsPath` and `deploymentsPath`.
-Wrapping the mutable `log` singleton is therefore the only seam that exists, and
-this package keeps that intervention as small as it can: the wrap forwards every
-call to the original method first, then enqueues a copy.
-
-An upstream transports API is the intended long-term seam. When it lands, this
-package will detect and prefer it automatically and drop the wrap. The public API
-here does not change, so nothing you write today needs revisiting.
+Severity is still lossy in one direction. Stacks has five levels, including
+`success`, and loghq has the eight RFC 5424 severities. `success` maps to `info`
+with the original kept in `context.original_level`, and `notice`, `critical`,
+`alert`, and `emergency` have no source at all: a Stacks app cannot currently
+emit them. That is a framework limitation this package will not paper over by
+guessing.
 
 ## License
 
