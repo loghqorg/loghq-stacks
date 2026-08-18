@@ -171,6 +171,18 @@ describe('resolveConfig', () => {
     expect(resolveConfig({ key: KEY }).endpoint).toBe(`${DEFAULT_HOST}/logs`)
   })
 
+  it('ships pointed at hosted loghq, not at a development host', () => {
+    // Spelled out rather than compared to the constant, which is the whole
+    // point: the assertion above passes against any value of DEFAULT_HOST,
+    // including the loopback address this package briefly shipped with. A
+    // default that quietly points somewhere local deploys, connects to
+    // nothing, and the transport swallows it, so missing logs are the only
+    // symptom. This line is what makes that a failing test rather than an
+    // incident.
+    expect(DEFAULT_HOST).toBe('https://loghq.org')
+    expect(resolveConfig({ key: KEY }).endpoint).toBe('https://loghq.org/logs')
+  })
+
   it('does not double the slash when the host has a trailing one', () => {
     expect(resolveConfig({ key: KEY, host: 'https://example.test/' }).endpoint).toBe('https://example.test/logs')
   })
