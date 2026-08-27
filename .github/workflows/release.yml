@@ -1,0 +1,52 @@
+name: Releaser
+
+# Publishing is a tag push, and nothing else.
+#
+# This exists because v0.2.0 was tagged and never published: `bun run release`
+# runs bumpp, which bumps package.json and writes the tag, while `npm publish`
+# is a separate step nobody ran. The tag therefore claimed a release the
+# registry had never heard of. Tying the publish to the tag is what stops that
+# pair from drifting again.
+#
+# `pantry publish` runs npm's lifecycle scripts, so `prepublishOnly` is what
+# builds dist/. That matters here: dist/ is gitignored, so a checkout carries
+# no build output and an unbuilt publish would ship a package whose `main`
+# points at a file that does not exist.
+#
+# Requires an NPM_TOKEN secret with publish rights on the @loghq scope. The
+# scope has never been used, so it has to exist before the first run.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # Provides bun, per deps.yaml. No setup-bun step is needed alongside it.
+      - name: Setup Pantry
+        uses: home-lang/pantry/packages/action@main
+
+      - name: Install Dependencies
+        run: bun install
+
+      - name: Publish
+        run: pantry publish --npm --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: stacksjs/action-releaser@v1.2.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
