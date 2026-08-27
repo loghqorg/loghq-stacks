@@ -13,6 +13,7 @@ import type { LogHQEntry } from '../src/types'
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
 import { LogHQClient } from '../src/client'
 import { activeSeam, install, uninstall } from '../src/stacks'
+import pkg from '../package.json'
 
 const KEY = `loghq_${'a1b2c3d4'.repeat(8)}`
 const HOST = 'http://ingest.test'
@@ -405,5 +406,29 @@ describe('adapter', () => {
     // enabled, and received nothing, with no way to tell from the outside.
     expect(activeSeam().seam).toBe('conflict')
     expect(warnings.join('\n')).toContain('another copy of @loghq/stacks')
+  })
+})
+
+describe('peer range', () => {
+  // `^0.70.366` on a 0.x version means `>=0.70.366 <0.71.0`, so it excluded the
+  // 0.72 line the framework had already moved to. Installing this package into
+  // a real Stacks app therefore resolved a SECOND @stacksjs/logging to satisfy
+  // the peer, and the package manager hoisted that older copy over the app's
+  // own. The app then ran a logging build whose config loader never reads
+  // `transports`, so a correctly declared transport in config/logging.ts was
+  // silently ignored: no error, no warning, no logs.
+  //
+  // Found by installing into bughq, which went from 0.72.76 to a hoisted
+  // 0.70.380 and delivered nothing until the range was widened.
+  it('accepts framework versions past the 0.70 line', () => {
+    const range = (pkg.peerDependencies ?? {})['@stacksjs/logging'] as string
+    expect(range).toBeDefined()
+
+    // A caret (or tilde) on a 0.x range is the specific shape that caused this.
+    expect(range.startsWith('^0.')).toBe(false)
+    expect(range.startsWith('~0.')).toBe(false)
+
+    // The floor stays: the fallback seam is what supports the older line.
+    expect(range).toContain('>=')
   })
 })

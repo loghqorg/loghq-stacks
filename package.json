@@ -43,7 +43,7 @@
     "release:major": "bumpp major --yes package.json"
   },
   "peerDependencies": {
-    "@stacksjs/logging": "^0.70.366"
+    "@stacksjs/logging": ">=0.70.366"
   },
   "peerDependenciesMeta": {
     "@stacksjs/logging": {
@@ -51,7 +51,7 @@
     }
   },
   "devDependencies": {
-    "@stacksjs/logging": "^0.70.366",
+    "@stacksjs/logging": ">=0.72.76",
     "@types/bun": "^1.1.14",
     "@types/node": "^22.10.2",
     "bumpp": "^12.0.0",

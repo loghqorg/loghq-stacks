@@ -5,7 +5,7 @@
     "": {
       "name": "@loghq/stacks",
       "devDependencies": {
-        "@stacksjs/logging": "^0.70.366",
+        "@stacksjs/logging": ">=0.72.76",
         "@types/bun": "^1.1.14",
         "@types/node": "^22.10.2",
         "bumpp": "^12.0.0",
@@ -13,7 +13,7 @@
         "typescript": "^5.7.2",
       },
       "peerDependencies": {
-        "@stacksjs/logging": "^0.70.366",
+        "@stacksjs/logging": ">=0.70.366",
       },
       "optionalPeers": [
         "@stacksjs/logging",
@@ -25,9 +25,9 @@
 
     "@stacksjs/clapp": ["@stacksjs/clapp@0.2.13", "", {}, "sha512-wh6Ybgga1S/3P+GRDb2kBiOK97+Ay7TKTiaLKfhpgd+V04+BAHg23xDlZUNkpllhoRdFimeHpWahuwghoNYbUg=="],
 
-    "@stacksjs/clarity": ["@stacksjs/clarity@0.3.31", "", { "dependencies": { "bunfig": "^0.15.6" }, "bin": { "clarity": "./dist/bin/cli.js" } }, "sha512-lMw327fKgABG7+cPwtJoiEFlrC9foxrMYKRWIagqEtNHKzgxBR17hOAXH27D4hgLDLvkQFUCNDY4kcWXCt62fQ=="],
+    "@stacksjs/clarity": ["@stacksjs/clarity@0.3.33", "", { "dependencies": { "bunfig": "^0.15.6" }, "bin": { "clarity": "./dist/bin/cli.js" } }, "sha512-+5GLKnAI/M/z64UfNLLfQqx/kp+frmRY+NZXYwwGwbrkud/xlsEGDWEExdhqOhqEDMWdb1oafw/ubGAPg1PaFw=="],
 
-    "@stacksjs/logging": ["@stacksjs/logging@0.70.371", "", { "dependencies": { "@stacksjs/clarity": "^0.3.31" } }, "sha512-d+bmHcBIl05Y2N5OfeZwRvgScXqVb9O129hOWCox35RYlNX94+LnCiEFI3Qm/+CHas1t9N5VcypnyAfKDjBtxA=="],
+    "@stacksjs/logging": ["@stacksjs/logging@0.72.92", "", { "dependencies": { "@stacksjs/clarity": "^0.3.33" } }, "sha512-KB10Y+hJhiAuweUkU5M6UbCUjnWApEAOB3j0tt2b6ZgfHZDRLPZNIFOjGQmy0sElGS/fJBUzJlJcxkpGokjXlw=="],
 
     "@stacksjs/ts-spell-check": ["@stacksjs/ts-spell-check@0.1.0", "", {}, "sha512-GnrxhHh606U6e0uPoUfbyh3sWI2VCtj6IwtSS4ik8Jz7vF11WFZ4qeCnXlUSZXLLlk0ukcdpilZr4girmx7PbA=="],
 
@@ -76,5 +76,9 @@
     "verkit": ["verkit@0.3.2", "", {}, "sha512-zj/ob3UsvJGN0whEAKFp53REA5X66hvffVqoCtVQAakJKnKlH+/PcOfMoFwIG/o4rElqLv/ycAFlx8ZlXUorCg=="],
 
     "yaml": ["yaml@2.9.0", "", { "bin": { "yaml": "bin.mjs" } }, "sha512-2AvhNX3mb8zd6Zy7INTtSpl1F15HW6Wnqj0srWlkKLcpYl/gMIMJiyuGq2KeI2YFxUPjdlB+3Lc10seMLtL4cA=="],
+
+    "bunfig/@stacksjs/clarity": ["@stacksjs/clarity@0.3.31", "", { "dependencies": { "bunfig": "^0.15.6" }, "bin": { "clarity": "./dist/bin/cli.js" } }, "sha512-lMw327fKgABG7+cPwtJoiEFlrC9foxrMYKRWIagqEtNHKzgxBR17hOAXH27D4hgLDLvkQFUCNDY4kcWXCt62fQ=="],
+
+    "pickier/@stacksjs/clarity": ["@stacksjs/clarity@0.3.31", "", { "dependencies": { "bunfig": "^0.15.6" }, "bin": { "clarity": "./dist/bin/cli.js" } }, "sha512-lMw327fKgABG7+cPwtJoiEFlrC9foxrMYKRWIagqEtNHKzgxBR17hOAXH27D4hgLDLvkQFUCNDY4kcWXCt62fQ=="],
   }
 }
