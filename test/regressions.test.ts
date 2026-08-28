@@ -432,3 +432,28 @@ describe('peer range', () => {
     expect(range).toContain('>=')
   })
 })
+
+describe('sdk version', () => {
+  // 0.2.1 shipped announcing itself as 0.2.0. The constant was restated in
+  // src/types.ts, and `bumpp` bumps package.json only, so the two drifted the
+  // moment a release happened. `sdk.version` is the only version signal loghq
+  // receives, which makes the failure worst exactly when it matters most:
+  // diagnosing a bug specific to one released version.
+  //
+  // Asserting SDK_VERSION === pkg.version would prove nothing now that the
+  // constant is derived from that same file - both sides read one value, so
+  // the comparison can never fail. What is worth guarding is the shape: that
+  // the version is still derived and has not been restated as a literal.
+  it('derives the version instead of restating it', async () => {
+    const source = await Bun.file(`${import.meta.dir}/../src/types.ts`).text()
+
+    const declaration = source
+      .split('\n')
+      .find(line => line.includes('export const SDK_VERSION'))
+    expect(declaration).toBeDefined()
+
+    // A quoted dotted number on that line means someone typed it by hand.
+    expect(declaration).not.toMatch(/['"`]\d+\.\d+\.\d+/)
+    expect(source).toContain("from '../package.json'")
+  })
+})

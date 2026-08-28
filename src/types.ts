@@ -1,3 +1,5 @@
+import { version } from '../package.json'
+
 /**
  * The wire contract, as types.
  *
@@ -8,7 +10,18 @@
 
 /** SDK identity sent on every entry. It is the only version signal loghq gets. */
 export const SDK_NAME = 'loghq.stacks'
-export const SDK_VERSION = '0.2.0'
+
+/**
+ * Read from package.json rather than restated here.
+ *
+ * It was restated, and it drifted: 0.2.1 shipped announcing itself as 0.2.0,
+ * because `bumpp` bumps package.json and knows nothing about a constant in
+ * src/. Since this is the only version signal loghq gets, the one release
+ * where the version matters - a version-specific bug - is the one where the
+ * field lies. Bun inlines this at build time, so the published bundle carries
+ * a literal and reads no file at runtime.
+ */
+export const SDK_VERSION: string = version
 
 /**
  * Where entries go when neither `host` nor a DSN says otherwise.
