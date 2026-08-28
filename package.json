@@ -42,14 +42,6 @@
     "release:minor": "bumpp minor --yes package.json",
     "release:major": "bumpp major --yes package.json"
   },
-  "peerDependencies": {
-    "@stacksjs/logging": ">=0.70.366"
-  },
-  "peerDependenciesMeta": {
-    "@stacksjs/logging": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@stacksjs/logging": ">=0.72.76",
     "@types/bun": "^1.1.14",

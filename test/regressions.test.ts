@@ -409,27 +409,42 @@ describe('adapter', () => {
   })
 })
 
-describe('peer range', () => {
-  // `^0.70.366` on a 0.x version means `>=0.70.366 <0.71.0`, so it excluded the
-  // 0.72 line the framework had already moved to. Installing this package into
-  // a real Stacks app therefore resolved a SECOND @stacksjs/logging to satisfy
-  // the peer, and the package manager hoisted that older copy over the app's
-  // own. The app then ran a logging build whose config loader never reads
-  // `transports`, so a correctly declared transport in config/logging.ts was
-  // silently ignored: no error, no warning, no logs.
+describe('framework coupling', () => {
+  // There is no peerDependency on @stacksjs/logging, deliberately, and this
+  // asserts it stays gone.
   //
-  // Found by installing into bughq, which went from 0.72.76 to a hoisted
-  // 0.70.380 and delivered nothing until the range was widened.
-  it('accepts framework versions past the 0.70 line', () => {
-    const range = (pkg.peerDependencies ?? {})['@stacksjs/logging'] as string
-    expect(range).toBeDefined()
+  // It used to be `^0.70.366`. A caret on a 0.x pins the minor, so it excluded
+  // the 0.72 line the framework had moved to, and installing this package into
+  // a real Stacks app resolved a SECOND @stacksjs/logging to satisfy the peer,
+  // which the package manager then hoisted over the app's own. bughq went from
+  // 0.72.76 to a hoisted 0.70.380, and since 0.72 reads `transports` from
+  // config/logging.ts while 0.70 does not, the transport silently did nothing.
+  //
+  // Widening the range fixed that instance. Removing the peer removes the
+  // class: nothing here can influence which framework copy an app resolves.
+  //
+  // Safe because the dependency is not real. There is no static import of
+  // @stacksjs/*; the only reference is a guarded dynamic `import()` inside
+  // importLogging(), which returns null on failure and falls back to the
+  // globals seam. And @stacksjs/logging now depends on THIS package, so the
+  // module is always resolvable from here anyway - declaring the reverse edge
+  // as well would make it a cycle.
+  it('declares no peer on the framework', () => {
+    // Cast because the JSON import is typed structurally: with the key gone,
+    // reading it off the inferred type is itself a compile error, which would
+    // make this assertion impossible to write.
+    expect((pkg as Record<string, unknown>).peerDependencies).toBeUndefined()
+  })
 
-    // A caret (or tilde) on a 0.x range is the specific shape that caused this.
-    expect(range.startsWith('^0.')).toBe(false)
-    expect(range.startsWith('~0.')).toBe(false)
-
-    // The floor stays: the fallback seam is what supports the older line.
-    expect(range).toContain('>=')
+  it('does not statically import the framework', async () => {
+    const dir = `${import.meta.dir}/../src`
+    for (const file of ['index.ts', 'client.ts', 'stacks.ts', 'types.ts', 'levels.ts']) {
+      const source = await Bun.file(`${dir}/${file}`).text()
+      const statics = source
+        .split('\n')
+        .filter(line => /^\s*import\s/.test(line) && line.includes('@stacksjs/'))
+      expect(statics).toEqual([])
+    }
   })
 })
 
