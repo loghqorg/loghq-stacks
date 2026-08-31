@@ -28,7 +28,7 @@
  * one.
  */
 
-import type { LogHQConfig, LogHQEntry, LogHQLevel, StacksLogRecord, StacksLogTransport } from './types'
+import type { DisabledReason, LogHQConfig, LogHQEntry, LogHQLevel, StacksLogRecord, StacksLogTransport } from './types'
 import { LogHQClient } from './client'
 import { atLeast, isLossy, toLogHQLevel } from './levels'
 
@@ -93,6 +93,36 @@ export interface SeamInfo {
   via: string | null
 }
 
+/**
+ * A seam, plus whether anything will actually come out of it.
+ *
+ * Attachment and delivery are separate failures and only the first is visible
+ * from the outside. A transport with no ingest key attaches perfectly: the
+ * logger holds it, it is called for every record, and it drops all of them,
+ * because the client disabled itself on construction. Reporting that as
+ * attached is true and useless — it is exactly the state an app sits in when
+ * `LOGHQ_KEY` never reached the box.
+ */
+export interface AttachmentInfo extends SeamInfo {
+  /** True when the client behind this seam will send. */
+  live: boolean
+  /**
+   * Why the client stopped, when it diagnosed a failure — `auth` for a missing
+   * or rejected key. Null both when nothing is wrong and when the client is
+   * merely configured `enabled: false`, so check {@link live} first.
+   */
+  disabledReason: DisabledReason | null
+  /**
+   * Whether {@link live} was measured or assumed.
+   *
+   * False when the logger holds a matching transport this copy of the package
+   * did not build — another copy did, and its client is not reachable from
+   * here. `live` is then optimistic. Assert on this too if you would rather a
+   * boot check be strict than forgiving.
+   */
+  introspected: boolean
+}
+
 /** The Stacks logger methods worth draining. `toLogHQLevel` maps each name. */
 const TEE_METHODS = ['info', 'success', 'warn', 'warning', 'error', 'debug'] as const
 
@@ -147,6 +177,20 @@ interface TeeResult {
 let current: Installation | null = null
 let attaching: Promise<SeamInfo> | null = null
 let generation = 0
+
+/**
+ * Transport object → the installation behind it, for {@link verifyAttached}.
+ *
+ * A declared transport hands the logger `{ name, log, flush }` and keeps its
+ * client in a closure, so the object the logger holds cannot answer whether it
+ * will actually send. This is the way back. Weak, so a transport dropped by a
+ * reloaded config does not pin its client.
+ *
+ * Note this is a lookup table, not a signal: presence here means "constructed",
+ * which happens whether or not the framework ever reads the config. Only
+ * `transports()` proves attachment, and this map is consulted after it.
+ */
+const declaredTransports = new WeakMap<StacksLogTransport, Installation>()
 
 /**
  * The forward path is running.
@@ -268,6 +312,129 @@ export function installedClient(): LogHQClient | null {
 }
 
 /**
+ * Whether loghq is really attached — asked of the logger, not inferred.
+ *
+ * {@link activeSeam} only sees installations {@link install} created, because a
+ * transport declared in `config/logging.ts` is owned by that config and
+ * deliberately never becomes this module's `current` installation. So on the
+ * seam most apps ship — the declarative one — `activeSeam()` answers `none`,
+ * which reads as failure and is not one.
+ *
+ * Nor does constructing the transport prove anything: a config file is
+ * evaluated whether or not the framework goes on to read `transports`. On a
+ * framework version without transport support, the config loads, this package
+ * loads, `loghqTransport()` returns a perfectly good transport, and not one
+ * record is ever delivered. Since 0.2.3 carries no `peerDependencies`, nothing
+ * upstream of this warns about it either.
+ *
+ * Asking the logger which transports it actually holds is the only question
+ * whose answer separates those two cases, so it is the one worth putting in a
+ * boot assertion.
+ *
+ * @param options.name Transport name to look for. Match the `name` given to
+ * {@link loghqTransport}, which defaults to `loghq`.
+ * @param options.logger The logger to interrogate, skipping the runtime probe
+ * for `@stacksjs/logging`. The same injection point {@link install} takes, and
+ * the only way to ask the question of something that is not a real Stacks app.
+ */
+export async function verifyAttached(options: { name?: string, logger?: unknown } = {}): Promise<AttachmentInfo> {
+  const name = options.name ?? 'loghq'
+
+  // An `install()` attach settles asynchronously, so wait for it before
+  // concluding anything. Only a *delivering* install seam is the answer: a
+  // `conflict` never receives a record, and a tee whose client disabled itself
+  // does not disprove a declared transport that is working. Both are held as
+  // the fallback while the registry is asked.
+  const installed = await whenAttached()
+  const viaInstall = installed.seam === 'none' ? null : withLiveness(installed, current)
+  if (viaInstall?.live)
+    return viaInstall
+
+  const handle = options.logger !== undefined
+    ? asLoggingHandle(options.logger)
+    : await importLogging()
+
+  // The framework registers `config/logging.ts` transports inside the logger's
+  // own lazy initialisation, not at module load, and `transports()` is a plain
+  // read of a list that stays empty until something triggers it. Reading it
+  // straight after the import answers `[]` for a transport that is declared,
+  // keyed and delivering — a false negative that a boot assertion turns into a
+  // crash, and the earlier the assertion runs the more certain it is to fire.
+  // This is the same initialisation the app's first log line performs, and it
+  // is idempotent once it has run.
+  const init = handle && pickFn(handle.ns, 'logger')
+  if (init) {
+    try {
+      await init()
+    }
+    catch {
+      // A logger that will not initialise holds no transports. Fall through and
+      // let the registry read answer, rather than taking down the boot.
+    }
+  }
+
+  const read = handle && pickFn(handle.ns, 'transports')
+  if (!read)
+    return viaInstall ?? DETACHED
+
+  try {
+    const list = read()
+    if (Array.isArray(list)) {
+      // One delivering transport under this name is the answer. A dead one only
+      // answers when nothing under that name delivers, so a duplicate left by a
+      // re-evaluated config cannot mask a working one by being first.
+      // eslint-disable-next-line prefer-const -- reassigned below via `??=`, which the rule misses
+      let dead: AttachmentInfo | null = null
+      for (const held of list) {
+        if ((held as { name?: unknown } | null)?.name !== name)
+          continue
+        const inst = declaredTransports.get(held as StacksLogTransport) ?? null
+        const info = inst === current && viaInstall
+          ? viaInstall
+          : withLiveness({ seam: 'transport', via: 'config/logging.ts' }, inst)
+        if (info.live)
+          return info
+        dead ??= info
+      }
+      if (dead)
+        return dead
+    }
+  }
+  catch {
+    // A reader that throws tells us nothing; report unattached rather than
+    // taking down the boot of an app whose logging is otherwise fine.
+  }
+
+  return viaInstall ?? DETACHED
+}
+
+const DETACHED: AttachmentInfo = { seam: 'none', via: null, live: false, disabledReason: null, introspected: false }
+
+/**
+ * Pair a seam with whether its client will actually send.
+ *
+ * Two cases cannot be answered by asking a client. A `conflict` install is one:
+ * another copy of this package owns the logger, so this installation's client
+ * is perfectly enabled and will still never see a record — enabled is not the
+ * same question as attached, and only here do they come apart. And a transport
+ * this copy did not build has no client to ask; it is reported live because
+ * failing a working app is the worse error for a boot assertion to make, with
+ * `introspected: false` so a caller who wants to be strict still can be.
+ */
+function withLiveness(seam: SeamInfo, inst: Installation | null): AttachmentInfo {
+  if (seam.seam === 'conflict')
+    return { ...seam, live: false, disabledReason: null, introspected: true }
+  if (!inst)
+    return { ...seam, live: true, disabledReason: null, introspected: false }
+  return {
+    ...seam,
+    live: inst.client.isEnabled(),
+    disabledReason: inst.client.disabledReason(),
+    introspected: true,
+  }
+}
+
+/**
  * A loghq transport for `config/logging.ts`.
  *
  * The declarative half of this package, and the better half where the
@@ -321,7 +488,7 @@ export function loghqTransport(config: LogHQConfig & TransportOptions = {}): Sta
     token: -1,
   }
 
-  return {
+  const transport: StacksLogTransport = {
     name: config.name ?? 'loghq',
     // Deliberately no `level`: the transport asks for everything and filters on
     // `minLevel` instead. The framework's five levels and loghq's eight are
@@ -340,6 +507,9 @@ export function loghqTransport(config: LogHQConfig & TransportOptions = {}): Sta
       await client.flush()
     },
   }
+
+  declaredTransports.set(transport, inst)
+  return transport
 }
 
 // --- Attachment -------------------------------------------------------------
@@ -480,6 +650,12 @@ function tryTransport(inst: Installation, ns: Record<string, unknown>): string |
       continue
     try {
       const result = register(sink)
+      // This sink is named `loghq` and lives in the host's registry, so
+      // `verifyAttached` will find it. Without this it would miss the map and
+      // be laundered into "a foreign transport, assume it works" — including
+      // after `uninstall()`, when a registrar that returned no undo leaves the
+      // sink in place with `detached` set and forwarding nothing.
+      declaredTransports.set(sink as unknown as StacksLogTransport, inst)
       inst.restore.push(() => {
         detached = true
         if (typeof result === 'function')

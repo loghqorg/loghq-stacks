@@ -268,6 +268,45 @@ structured stream too.
 `install()` probes for the registry first and only tees if it finds none, so the
 same call works on any framework version and upgrades itself when the app does.
 
+### Proving it attached
+
+Neither cheap signal is the one you want. `activeSeam()` reports only what
+`install()` built, so on the declarative seam it answers `none` even though the
+transport is live and delivering. And a transport that constructed cleanly
+proves only that a config file was evaluated — on a framework without transport
+support the config loads, this package loads, `loghqTransport()` returns a
+perfectly good transport, and not one record is ever delivered. Since 0.2.3
+carries no `peerDependencies`, nothing upstream warns about that either.
+
+`verifyAttached()` asks the logger which transports it actually holds, and then
+asks that transport's client whether it will send. Those are two different
+failures and you want both:
+
+```ts
+import { verifyAttached } from '@loghq/stacks'
+
+const a = await verifyAttached()
+if (a.seam === 'none')
+  throw new Error('loghq declared but not attached — check the framework version')
+if (!a.live)
+  throw new Error(`loghq attached but dead: ${a.disabledReason ?? 'disabled in config'}`)
+```
+
+The second check is not paranoia. A transport with no ingest key attaches
+perfectly — the logger holds it and hands it every record, and it drops all of
+them, because the client disabled itself the moment it was built with an empty
+key. `disabledReason` is `auth` in exactly that case, which is what an app looks
+like when `LOGHQ_KEY` never reached the box. Config files are also evaluated
+early, sometimes before the environment is populated, so an empty key at
+construction is a live hazard rather than a hypothetical one.
+
+It covers both seams: a live `install()` tee reports `tee`, a declared transport
+the logger picked up reports `transport`. Pass `name` if you registered the
+transport under one, and `logger` to interrogate a specific logger instead of
+probing for `@stacksjs/logging`.
+
+Worth running at boot in production. It is the only falsifier this package has.
+
 ## Roadmap
 
 Severity is still lossy in one direction. Stacks has five levels, including

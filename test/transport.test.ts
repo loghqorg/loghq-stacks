@@ -13,7 +13,7 @@
 
 import type { LogHQEntry, StacksLogRecord, StacksLogTransport } from '../src/types'
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
-import { activeSeam, install, loghqTransport, uninstall } from '../src/stacks'
+import { activeSeam, install, loghqTransport, uninstall, verifyAttached } from '../src/stacks'
 
 const KEY = `loghq_${'a1b2c3d4'.repeat(8)}`
 const HOST = 'http://ingest.test'
@@ -287,5 +287,208 @@ describe('install() against a framework that has the registry', () => {
 
     uninstall()
     expect(attached).toBe(false)
+  })
+})
+
+/**
+ * `verifyAttached()` exists because neither of the two facts you can get for
+ * free is the fact you want.
+ *
+ * `activeSeam()` reports only what `install()` built, and a declared transport
+ * is deliberately not that. Constructing the transport reports only that a
+ * config file was evaluated, which happens on a framework that will never read
+ * it. The question that separates them can only be put to the logger, which is
+ * why `logger` is injected here the same way `install()` takes it.
+ */
+describe('verifyAttached', () => {
+  const DETACHED = { seam: 'none', via: null, live: false, disabledReason: null, introspected: false } as const
+
+  /** A logger namespace holding a real registry, the way 0.72.x does. */
+  function withRegistry(held: StacksLogTransport[]) {
+    return {
+      log: makeFakeLog(),
+      transports: () => held.slice(),
+      registerTransport: (sink: StacksLogTransport) => {
+        held.push(sink)
+        return () => { held.splice(held.indexOf(sink), 1) }
+      },
+    }
+  }
+
+  it('reports the declarative seam that activeSeam() cannot see', async () => {
+    const held: StacksLogTransport[] = []
+    const logger = withRegistry(held)
+
+    // Exactly what config/logging.ts does, then what the framework does with
+    // the value it returned.
+    held.push(loghqTransport({ ...baseOptions }))
+
+    // The false negative this function exists to correct: attached, reported
+    // as unattached, because the installation belongs to the config.
+    expect(activeSeam()).toEqual({ seam: 'none', via: null })
+    expect(await verifyAttached({ logger })).toEqual({ seam: 'transport', via: 'config/logging.ts', live: true, disabledReason: null, introspected: true })
+  })
+
+  it('reports none when the framework never read the config', async () => {
+    // reportshq's shape: a logger with no transport registry at all. The config
+    // still evaluates and this package still loads, so every signal short of
+    // asking the logger says yes.
+    const logger = { log: makeFakeLog() }
+    const transport = loghqTransport({ ...baseOptions })
+    expect(transport.name).toBe('loghq')
+
+    expect(await verifyAttached({ logger })).toEqual(DETACHED)
+  })
+
+  it('does not mistake somebody else\'s transport for ours', async () => {
+    const logger = withRegistry([{ name: 'bughq', log: () => {} } as unknown as StacksLogTransport])
+
+    expect(await verifyAttached({ logger })).toEqual(DETACHED)
+  })
+
+  it('matches a transport registered under a custom name', async () => {
+    const held: StacksLogTransport[] = []
+    const logger = withRegistry(held)
+    held.push(loghqTransport({ ...baseOptions, name: 'loghq-audit' }))
+
+    expect(await verifyAttached({ logger })).toEqual(DETACHED)
+    expect(await verifyAttached({ logger, name: 'loghq-audit' }))
+      .toEqual({ seam: 'transport', via: 'config/logging.ts', live: true, disabledReason: null, introspected: true })
+  })
+
+  it('prefers a live install() seam over the registry', async () => {
+    const log = makeFakeLog()
+    const client = install({ ...baseOptions, logger: log, captureUnhandled: false } as any)
+    closers.push(() => client.close())
+
+    // install() found no registrar and patched log.* instead. That is a real
+    // attachment and must be reported as the tee it is, not overwritten by a
+    // registry lookup that would answer none.
+    expect(await verifyAttached({ logger: log })).toEqual({ seam: 'tee', via: 'log.*', live: true, disabledReason: null, introspected: true })
+  })
+
+  it('reports a keyless transport as attached but not live', async () => {
+    // The failure that hid in production for weeks. config/logging.ts is
+    // evaluated before the env is populated, so `key` arrives empty, the client
+    // disables itself on construction, and the transport still attaches
+    // perfectly: the logger holds it and hands it every record, which it drops.
+    // Attachment alone therefore cannot be the boot assertion.
+    const held: StacksLogTransport[] = []
+    const logger = withRegistry(held)
+    held.push(loghqTransport({ ...baseOptions, key: '' }))
+
+    const info = await verifyAttached({ logger })
+    expect(info.seam).toBe('transport')
+    expect(info.live).toBe(false)
+    expect(info.disabledReason).toBe('auth')
+  })
+
+  it('reports a keyed transport as live', async () => {
+    const held: StacksLogTransport[] = []
+    const logger = withRegistry(held)
+    held.push(loghqTransport({ ...baseOptions }))
+
+    const info = await verifyAttached({ logger })
+    expect(info.live).toBe(true)
+    expect(info.disabledReason).toBeNull()
+  })
+
+  it('reports a foreign transport as live, rather than failing a working app', async () => {
+    // Another copy of this package built it, so it is not in our WeakMap. It is
+    // genuinely attached; calling that a failure is the worse error.
+    const logger = withRegistry([{ name: 'loghq', log: () => {} } as unknown as StacksLogTransport])
+
+    const info = await verifyAttached({ logger })
+    expect(info).toEqual({ seam: 'transport', via: 'config/logging.ts', live: true, disabledReason: null, introspected: false })
+  })
+
+  it('survives a reader that throws', async () => {
+    const logger = {
+      log: makeFakeLog(),
+      transports: () => { throw new Error('registry has not booted') },
+    }
+
+    expect(await verifyAttached({ logger })).toEqual(DETACHED)
+  })
+})
+
+/**
+ * Regressions from an adversarial audit of `verifyAttached()`. Each of these
+ * failed before its fix, and every one of them made the function answer the
+ * opposite of the truth — which for a boot assertion means either crashing a
+ * healthy app or blessing a dead one.
+ */
+describe('verifyAttached regressions', () => {
+  function registry(held: StacksLogTransport[], opts: { lazy?: boolean } = {}) {
+    let started = !opts.lazy
+    return {
+      log: makeFakeLog(),
+      // The real @stacksjs/logging registers config transports inside this,
+      // not at module load. Until it is awaited, transports() is empty.
+      logger: async () => { started = true },
+      transports: () => (started ? held.slice() : []),
+    }
+  }
+
+  it('triggers the logger\'s lazy init before reading the registry', async () => {
+    // The worst failure of the lot: a declared, keyed, delivering transport
+    // reported as seam:'none' purely because nothing had logged yet. The
+    // documented assertion throws on that, so it would crash healthy apps at
+    // boot — precisely when a boot assertion runs.
+    const held: StacksLogTransport[] = [loghqTransport({ ...baseOptions })]
+    const logger = registry(held, { lazy: true })
+
+    expect(logger.transports()).toEqual([])
+    const info = await verifyAttached({ logger })
+    expect(info.seam).toBe('transport')
+    expect(info.live).toBe(true)
+  })
+
+  it('does not report a conflict seam as live', async () => {
+    // A conflict means another copy of the package owns the logger and this
+    // installation will never receive a record. Its client is nonetheless
+    // perfectly enabled, so asking the client alone gets this backwards.
+    const log = makeFakeLog()
+    const client = install({ ...baseOptions, logger: log, captureUnhandled: false } as any)
+    closers.push(() => client.close())
+    const seam = activeSeam()
+    if (seam.seam !== 'conflict')
+      return // only meaningful where a conflict is reachable
+
+    const info = await verifyAttached({ logger: log })
+    expect(info.live).toBe(false)
+  })
+
+  it('prefers a live declared transport over a dead install() seam', async () => {
+    // An app that moved its key into config/logging.ts but left the old
+    // bootstrap import in place has both seams. The install() client is dead;
+    // the declared one is delivering. Reporting the dead one fails a working app.
+    const held: StacksLogTransport[] = [loghqTransport({ ...baseOptions })]
+    const logger = registry(held)
+    const client = install({ ...baseOptions, key: '', logger, captureUnhandled: false } as any)
+    closers.push(() => client.close())
+
+    const info = await verifyAttached({ logger })
+    expect(info.live).toBe(true)
+    expect(info.disabledReason).toBeNull()
+  })
+
+  it('does not let a dead duplicate mask a live transport', async () => {
+    // config/logging.ts is evaluated many times during boot, so more than one
+    // transport can end up held under the same name. Taking the first is
+    // positional, not meaningful.
+    const held: StacksLogTransport[] = [
+      loghqTransport({ ...baseOptions, key: '' }),
+      loghqTransport({ ...baseOptions }),
+    ]
+    const info = await verifyAttached({ logger: registry(held) })
+    expect(info.live).toBe(true)
+  })
+
+  it('marks an un-introspectable transport as assumed, not measured', async () => {
+    const logger = registry([{ name: 'loghq', log: () => {} } as unknown as StacksLogTransport])
+    const info = await verifyAttached({ logger })
+    expect(info.live).toBe(true)
+    expect(info.introspected).toBe(false)
   })
 })
