@@ -186,11 +186,23 @@ let generation = 0
  * will actually send. This is the way back. Weak, so a transport dropped by a
  * reloaded config does not pin its client.
  *
+ * Shared through `Symbol.for` for the same reason {@link WRAPPED} is: one
+ * process can hold two copies of this package. A package manager that resolves
+ * the app's own import to `node_modules/` and the config file's to the install
+ * cache produces exactly that, and each copy would otherwise keep a private map
+ * — so a transport built by one copy is invisible to the other, misses the
+ * lookup, and gets reported as a foreign transport that is assumed live. That
+ * turns the missing-key case this whole function exists to catch back into a
+ * silent pass, which is how it was found.
+ *
  * Note this is a lookup table, not a signal: presence here means "constructed",
  * which happens whether or not the framework ever reads the config. Only
  * `transports()` proves attachment, and this map is consulted after it.
  */
-const declaredTransports = new WeakMap<StacksLogTransport, Installation>()
+const DECLARED = Symbol.for('loghq.stacks.declaredTransports')
+const declaredTransports: WeakMap<StacksLogTransport, Installation>
+  = ((globalThis as Record<symbol, unknown>)[DECLARED] as WeakMap<StacksLogTransport, Installation> | undefined)
+    ?? ((globalThis as Record<symbol, unknown>)[DECLARED] = new WeakMap<StacksLogTransport, Installation>())
 
 /**
  * The forward path is running.

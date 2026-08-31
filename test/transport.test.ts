@@ -492,3 +492,30 @@ describe('verifyAttached regressions', () => {
     expect(info.introspected).toBe(false)
   })
 })
+
+/**
+ * One process can hold two copies of this package — a package manager that
+ * resolves the app's import to node_modules/ and the config file's to the
+ * install cache is enough, and that is a real resolution, not a hypothetical.
+ * The transport-to-client map has to be shared across them or the copy that
+ * answers `verifyAttached` cannot see what the other copy built.
+ */
+describe('two copies of the package in one process', () => {
+  it('shares the transport lookup through a global symbol', async () => {
+    const KEY = Symbol.for('loghq.stacks.declaredTransports')
+    const shared = (globalThis as any)[KEY]
+    expect(shared).toBeInstanceOf(WeakMap)
+
+    // A transport built by "this copy" must be visible through the global the
+    // other copy would read, since that is the only thing they share.
+    const t = loghqTransport({ ...baseOptions, key: '' })
+    expect(shared.has(t)).toBe(true)
+
+    // And the verdict must come from the client, not from the assumed-live
+    // fallback — the exact regression that made a keyless app report healthy.
+    const info = await verifyAttached({ logger: { log: makeFakeLog(), transports: () => [t] } })
+    expect(info.introspected).toBe(true)
+    expect(info.live).toBe(false)
+    expect(info.disabledReason).toBe('auth')
+  })
+})
