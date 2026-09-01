@@ -1,7 +1,7 @@
 {
   "name": "@loghq/stacks",
   "type": "module",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "loghq log streaming for Stacks applications",
   "author": "loghq",
   "license": "MIT",
