@@ -519,3 +519,90 @@ describe('two copies of the package in one process', () => {
     expect(info.disabledReason).toBe('auth')
   })
 })
+
+describe('the cause reaches the searchable message', () => {
+  // loghq searches `message` and only `message` (`lower(message) LIKE ?`), so an
+  // error whose cause sits only in `context.exception` cannot be found by the
+  // words in that cause. The framework's own convention makes that the common
+  // case: `log.error('Job X failed:', err)` shipped as `Job X failed:`, a line
+  // ending in a colon that reads as truncated and is unsearchable.
+
+  function shipped(args: unknown[], message = ''): any {
+    const t = transport()
+    t.log(record({ level: 'error', message, args }))
+    return t
+  }
+
+  it('folds the cause into a message that ends in a colon', async () => {
+    const t = shipped(['Job Inspire failed:', new Error('Job Inspire not found')])
+    await t.flush!()
+
+    expect(lastEntry().message).toBe('Job Inspire failed: Error: Job Inspire not found')
+  })
+
+  it('keeps the structured exception as well', async () => {
+    const t = shipped(['Query failed:', new TypeError('connection refused')])
+    await t.flush!()
+
+    const e = lastEntry()
+    expect(e.message).toBe('Query failed: TypeError: connection refused')
+    expect(e.context.exception.name).toBe('TypeError')
+    expect(e.context.exception.message).toBe('connection refused')
+    expect(e.context.exception.stack).toBeTruthy()
+  })
+
+  it('adds a separator when the message does not end in punctuation', async () => {
+    const t = shipped(['could not reach the database', new Error('ECONNREFUSED')])
+    await t.flush!()
+
+    expect(lastEntry().message).toBe('could not reach the database: Error: ECONNREFUSED')
+  })
+
+  it('does not repeat a cause the call site already interpolated', async () => {
+    const t = shipped(['failed: ECONNREFUSED', new Error('ECONNREFUSED')])
+    await t.flush!()
+
+    expect(lastEntry().message).toBe('failed: ECONNREFUSED')
+  })
+
+  it('leaves the stack out of the message', async () => {
+    const err = new Error('bad')
+    const t = shipped(['boom:', err], `boom: Error: bad\n${err.stack}`)
+    await t.flush!()
+
+    const message = String(lastEntry().message)
+    expect(message).not.toContain('    at ')
+    expect(message.split('\n')).toHaveLength(1)
+  })
+
+  it('falls back to the name when the error carries no message', async () => {
+    const t = shipped(['failed:', new Error('')])
+    await t.flush!()
+
+    expect(lastEntry().message).toBe('failed: Error')
+  })
+
+  // The guards. Preferring `args` over the console line is deliberate and this
+  // change must not erode it.
+
+  it('leaves an ordinary trailing context object alone', async () => {
+    const t = transport()
+    t.log(record({
+      level: 'info',
+      message: 'checkout started {\n  "orderId": 42\n}',
+      args: ['checkout started', { orderId: 42 }],
+    }))
+    await t.flush!()
+
+    const e = lastEntry()
+    expect(e.message).toBe('checkout started')
+    expect(e.context.orderId).toBe(42)
+  })
+
+  it('leaves a bare Error first argument alone', async () => {
+    const t = shipped([new Error('standalone')])
+    await t.flush!()
+
+    expect(lastEntry().message).toBe('Error: standalone')
+  })
+})

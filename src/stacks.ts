@@ -971,7 +971,25 @@ function toEntry(inst: Installation, level: LogHQLevel, rawLevel: string, args: 
       // `log.error(message, error, context)` is the framework's own signature,
       // and the error is the payload, not an incidental argument.
       if (args[1] instanceof Error) {
-        context.exception = describeError(args[1] as Error, 0)
+        const err = args[1] as Error
+        context.exception = describeError(err, 0)
+        // The cause goes in the message as well as in `context.exception`.
+        //
+        // Structuring it is not enough on its own: loghq searches `message` and
+        // only `message` (`lower(message) LIKE ?`), so an entry whose cause
+        // lives solely in context cannot be found by the words in that cause.
+        // The framework's own convention makes this the common case, not an
+        // edge one - `log.error('Job X failed:', err)` - and it rendered in the
+        // dashboard as `Job X failed:`, a line ending in a colon that reads as
+        // truncated and is unsearchable by the only part anyone would query.
+        //
+        // Matching the framework's console rendering (`name: message`, no
+        // stack) means the same failure reads identically in the terminal and
+        // in loghq, which is what makes one greppable from the other. The stack
+        // stays out: it is already on `context.exception`, and it is the bulk
+        // of what makes the framework's fully-rendered `record.message`
+        // unsuitable to ship verbatim.
+        message = appendCause(message, err)
         rest.push(...args.slice(2))
       }
       else {
@@ -1320,6 +1338,33 @@ function serializeObject(source: Record<string, unknown>, depth = 0, seen: WeakS
  * pipeline as nothing at all. Name, message, and stack are pulled out by hand,
  * and the `cause` chain is walked to a bounded depth.
  */
+/**
+ * Fold an error's identity into a message that was logged alongside it.
+ *
+ * Separator by shape rather than always inserting one: framework call sites
+ * write `'Job X failed:'` with the colon already there, and `'Job X failed: :
+ * Error'` helps nobody. Anything not already ending in punctuation gets one.
+ *
+ * Returns the message untouched when it already carries the cause, so a call
+ * site that formatted the error in itself does not get it twice.
+ */
+function appendCause(message: string, err: Error): string {
+  const name = String(err.name ?? 'Error').trim()
+  const detail = String(err.message ?? '').trim()
+  const cause = detail ? (name ? `${name}: ${detail}` : detail) : name
+  if (!cause)
+    return message
+
+  const base = message.trimEnd()
+  if (!base)
+    return cause
+  // Already said it - a call site that interpolated the error itself.
+  if (base.includes(cause) || (detail && base.includes(detail)))
+    return message
+
+  return /[:\-–—,;(\[]$/.test(base) ? `${base} ${cause}` : `${base}: ${cause}`
+}
+
 function describeError(err: Error, depth: number): Record<string, unknown> {
   const out: Record<string, unknown> = {
     name: String(err.name ?? 'Error'),
